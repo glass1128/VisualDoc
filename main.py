@@ -7,11 +7,19 @@ from PyQt6.QtCore import Qt, QSize, QPoint, QEvent, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QCursor
 from datetime import datetime
 import pyscreenshot as ImageGrab
+import pyaudiowpatch as pyaudio
+from PIL import Image, ImageDraw, ImageOps
 
-app_path = os.getcwd()
-shot_path = os.path.join(app_path, "shots")
-if not os.path.exists(shot_path):
-    os.makedirs(shot_path)
+APP_PATH = os.getcwd()
+SHOT_PATH = os.path.join(APP_PATH, "shots")
+if not os.path.exists(SHOT_PATH):
+    os.makedirs(SHOT_PATH)
+CURSOR_ICON_PATH = os.path.join(APP_PATH, "cursor.png")
+
+MIC_RATE = 16000
+MIC_CHANNELS = 1
+MIC_DEVICE_INDEX = 2
+p = pyaudio.PyAudio()
 
 class GlobalMouseListener(QThread):
     mouse_clicked = pyqtSignal(int, int)
@@ -33,6 +41,18 @@ class GlobalMouseListener(QThread):
         """Stop the listener."""
         self.running = False
 
+def detect_mic():
+    global MIC_RATE, MIC_CHANNELS, MIC_DEVICE_INDEX
+    try:
+        wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+        default_microphone = p.get_device_info_by_index(wasapi_info["defaultInputDevice"])    
+        print(f"Recording microphone audio from: ({default_microphone['index']}) {default_microphone['name']}")
+        print(f"==========Channels, Rate===: ({default_microphone['maxInputChannels']}) {default_microphone['defaultSampleRate']}")
+        MIC_RATE = int(default_microphone["defaultSampleRate"])
+        MIC_CHANNELS = default_microphone["maxInputChannels"]
+        MIC_DEVICE_INDEX = default_microphone["index"]
+    except OSError:
+        print("No Audio Device.")
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -64,7 +84,7 @@ class MainWindow(QMainWindow):
 
         self.image_thumbnails = []
         self.current_image = None
-        self.load_images(shot_path)
+        self.load_images(SHOT_PATH)
 
         # Add widgets to top splitter
         top_splitter.addWidget(self.image_list)
@@ -173,6 +193,9 @@ class MainWindow(QMainWindow):
     def delete_image(self, item: QListWidgetItem):
         """Delete the selected image from the list."""
         self.image_list.takeItem(self.image_list.row(item))
+        item_path = os.path.join(SHOT_PATH, item.text())
+        if os.path.exists(item_path):
+            os.remove(item_path)
         print(f"Deleted image: {item.text()}")
 
     def display_image(self, item: QListWidgetItem):
@@ -208,15 +231,25 @@ class MainWindow(QMainWindow):
         # screenshot = screen.grabWindow(0)  # Capture the entire screen
 
         # Take screenshot of the entire screen using pyscreenshot
+        print(datetime.now().strftime('%Y%m%d%H%M%S'))
         screenshot = ImageGrab.grab()  # Capture the entire screen
-        screenshot_path = os.path.join(shot_path, f"{datetime.now().strftime('%Y%m%d%H%M%S')}.png")
+        cursor_icon = Image.open(CURSOR_ICON_PATH).convert("RGBA")
+
+        # Resize the cursor icon if needed
+        cursor_icon_size = 60  # Desired cursor size
+        cursor_icon = cursor_icon.resize((cursor_icon_size, cursor_icon_size), Image.Resampling.LANCZOS)
+        screenshot.paste(cursor_icon, (mouse_pos_x, mouse_pos_y), cursor_icon)
+
+        screenshot_path = os.path.join(SHOT_PATH, f"{datetime.now().strftime('%Y%m%d%H%M%S')}.png")
         screenshot.save(screenshot_path, "PNG")  # Save the screenshot
+        print(datetime.now().strftime('%Y%m%d%H%M%S'))
 
         print(f"Mouse clicked at: {mouse_pos_x}, {mouse_pos_y}")
         print(f"Screenshots saved.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    detect_mic()
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
