@@ -41,6 +41,36 @@ class GlobalMouseListener(QThread):
         """Stop the listener."""
         self.running = False
 
+class ScreenshotWorker(QThread):
+    screenshot_done = pyqtSignal(str)  # Signal to notify when screenshot is complete
+
+    def __init__(self, x, y, parent=None):
+        super().__init__(parent)
+        self.mouse_pos_x = x
+        self.mouse_pos_y = y
+
+    def run(self):
+        """Take a screenshot and print the mouse position."""
+        # screen = QApplication.primaryScreen()
+        # screenshot = screen.grabWindow(0)  # Capture the entire screen
+
+        # Take screenshot of the entire screen using pyscreenshot
+        print(datetime.now().strftime('%Y%m%d%H%M%S'))
+        screenshot = ImageGrab.grab()  # Capture the entire screen
+        cursor_icon = Image.open(CURSOR_ICON_PATH).convert("RGBA")
+
+        # Resize the cursor icon if needed
+        cursor_icon_size = 60  # Desired cursor size
+        cursor_icon = cursor_icon.resize((cursor_icon_size, cursor_icon_size), Image.Resampling.LANCZOS)
+        screenshot.paste(cursor_icon, (self.mouse_pos_x, self.mouse_pos_y), cursor_icon)
+
+        screenshot_path = os.path.join(SHOT_PATH, f"{datetime.now().strftime('%Y%m%d%H%M%S')}.png")
+        screenshot.save(screenshot_path, "PNG")  # Save the screenshot
+        print(datetime.now().strftime('%Y%m%d%H%M%S'))
+
+        # Emit the signal with the screenshot path
+        self.screenshot_done.emit(screenshot_path)
+
 def detect_mic():
     global MIC_RATE, MIC_CHANNELS, MIC_DEVICE_INDEX
     try:
@@ -226,26 +256,14 @@ class MainWindow(QMainWindow):
     #     return super().eventFilter(obj, event)
 
     def take_screenshot(self, mouse_pos_x, mouse_pos_y):
-        """Take a screenshot and print the mouse position."""
-        # screen = QApplication.primaryScreen()
-        # screenshot = screen.grabWindow(0)  # Capture the entire screen
+        """Handle the screenshot logic in a separate thread."""
+        self.screenshot_worker = ScreenshotWorker(mouse_pos_x, mouse_pos_y)
+        self.screenshot_worker.screenshot_done.connect(self.on_screenshot_done)
+        self.screenshot_worker.start()
 
-        # Take screenshot of the entire screen using pyscreenshot
-        print(datetime.now().strftime('%Y%m%d%H%M%S'))
-        screenshot = ImageGrab.grab()  # Capture the entire screen
-        cursor_icon = Image.open(CURSOR_ICON_PATH).convert("RGBA")
-
-        # Resize the cursor icon if needed
-        cursor_icon_size = 60  # Desired cursor size
-        cursor_icon = cursor_icon.resize((cursor_icon_size, cursor_icon_size), Image.Resampling.LANCZOS)
-        screenshot.paste(cursor_icon, (mouse_pos_x, mouse_pos_y), cursor_icon)
-
-        screenshot_path = os.path.join(SHOT_PATH, f"{datetime.now().strftime('%Y%m%d%H%M%S')}.png")
-        screenshot.save(screenshot_path, "PNG")  # Save the screenshot
-        print(datetime.now().strftime('%Y%m%d%H%M%S'))
-
-        print(f"Mouse clicked at: {mouse_pos_x}, {mouse_pos_y}")
-        print(f"Screenshots saved.")
+    def on_screenshot_done(self, screenshot_path):
+        """Handle post-screenshot actions."""
+        print(f"Screenshot saved at: {screenshot_path}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
