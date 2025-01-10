@@ -2,24 +2,96 @@ import os
 import sys
 from pynput.mouse import Listener as MouseListener
 from PyQt6.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QWidget, QListWidget, QLabel, QListWidgetItem, QSplitter
-from PyQt6.QtWidgets import QMenu, QPushButton, QHBoxLayout
+from PyQt6.QtWidgets import QMenu, QPushButton, QHBoxLayout, QDialog, QMessageBox
 from PyQt6.QtCore import Qt, QSize, QPoint, QEvent, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QCursor
 from datetime import datetime
 import pyscreenshot as ImageGrab
-import pyaudiowpatch as pyaudio
 from PIL import Image, ImageDraw, ImageOps
+import wave
+import pyaudiowpatch as pyaudio
+from pathlib import Path
+from UIAuto import get_element_under_cursor
 
 APP_PATH = os.getcwd()
 SHOT_PATH = os.path.join(APP_PATH, "shots")
+AUDIO_PATH = os.path.join(APP_PATH, "audio")
 if not os.path.exists(SHOT_PATH):
     os.makedirs(SHOT_PATH)
+if not os.path.exists(AUDIO_PATH):
+    os.makedirs(AUDIO_PATH)
 CURSOR_ICON_PATH = os.path.join(APP_PATH, "cursor.png")
+MIC_USABLE = False
 
 MIC_RATE = 16000
 MIC_CHANNELS = 1
 MIC_DEVICE_INDEX = 2
-p = pyaudio.PyAudio()
+
+def detect_mic():
+    global MIC_RATE, MIC_CHANNELS, MIC_DEVICE_INDEX, MIC_USABLE
+    try:
+        p = pyaudio.PyAudio()
+        wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+        default_microphone = p.get_device_info_by_index(wasapi_info["defaultInputDevice"])    
+        print(f"Recording microphone audio from: ({default_microphone['index']}) {default_microphone['name']}")
+        print(f"==========Channels, Rate===: ({default_microphone['maxInputChannels']}) {default_microphone['defaultSampleRate']}")
+        MIC_RATE = int(default_microphone["defaultSampleRate"])
+        MIC_CHANNELS = default_microphone["maxInputChannels"]
+        MIC_DEVICE_INDEX = default_microphone["index"]
+        MIC_USABLE = True
+    except OSError:
+        print("No Audio Device.")
+
+class AudioRecorder(QThread):
+    recording_done = pyqtSignal(str)  # Signal to notify when recording is complete
+
+    def __init__(self, mic_rate=MIC_RATE, mic_channels=MIC_CHANNELS, mic_device_index=MIC_DEVICE_INDEX, audio_name = None, parent=None):
+        super().__init__(parent)
+        self.mic_rate = mic_rate
+        self.mic_channels = mic_channels
+        self.mic_device_index = mic_device_index
+        self.is_recording = False
+        self.audio_name = audio_name  # Pass the path from outside
+
+    def run(self):
+        """Start recording audio."""
+        self.is_recording = True
+        audio = pyaudio.PyAudio()
+        stream = audio.open(
+            format=pyaudio.paInt16,
+            channels=self.mic_channels,
+            rate=self.mic_rate,
+            input=True,
+            input_device_index=self.mic_device_index,
+            frames_per_buffer=1024,
+        )
+
+        frames = []
+        while self.is_recording:
+            data = stream.read(1024, exception_on_overflow=False)
+            frames.append(data)
+
+        # Stop and save the recording
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
+
+        # Save to a WAV file
+        if self.audio_name is None:
+            self.audio_name = datetime.now().strftime('%Y%m%d%H%M%S')
+        audio_path = os.path.join(AUDIO_PATH, f"{self.audio_name}.wav")
+        with wave.open(audio_path, 'wb') as wf:
+            wf.setnchannels(self.mic_channels)
+            wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
+            wf.setframerate(self.mic_rate)
+            wf.writeframes(b''.join(frames))
+
+        # Emit the signal with the file path
+        self.recording_done.emit(audio_path)
+
+    def stop(self):
+        """Stop recording audio."""
+        self.is_recording = False
 
 class GlobalMouseListener(QThread):
     mouse_clicked = pyqtSignal(int, int)
@@ -60,7 +132,7 @@ class ScreenshotWorker(QThread):
         cursor_icon = Image.open(CURSOR_ICON_PATH).convert("RGBA")
 
         # Resize the cursor icon if needed
-        cursor_icon_size = 60  # Desired cursor size
+        cursor_icon_size = 90  # Desired cursor size
         cursor_icon = cursor_icon.resize((cursor_icon_size, cursor_icon_size), Image.Resampling.LANCZOS)
         screenshot.paste(cursor_icon, (self.mouse_pos_x, self.mouse_pos_y), cursor_icon)
 
@@ -71,27 +143,35 @@ class ScreenshotWorker(QThread):
         # Emit the signal with the screenshot path
         self.screenshot_done.emit(screenshot_path)
 
-def detect_mic():
-    global MIC_RATE, MIC_CHANNELS, MIC_DEVICE_INDEX
-    try:
-        wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-        default_microphone = p.get_device_info_by_index(wasapi_info["defaultInputDevice"])    
-        print(f"Recording microphone audio from: ({default_microphone['index']}) {default_microphone['name']}")
-        print(f"==========Channels, Rate===: ({default_microphone['maxInputChannels']}) {default_microphone['defaultSampleRate']}")
-        MIC_RATE = int(default_microphone["defaultSampleRate"])
-        MIC_CHANNELS = default_microphone["maxInputChannels"]
-        MIC_DEVICE_INDEX = default_microphone["index"]
-    except OSError:
-        print("No Audio Device.")
+class LoadingScreen(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Loading")
+        self.setFixedSize(200, 100)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+
+        # Center the dialog
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+        # Add a label
+        layout = QVBoxLayout(self)
+        self.label = QLabel("Processing...")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.label)
+
+        # Optional: Add a progress bar or spinner here
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.selected_name = ""
         self.initUI()
 
     def initUI(self):
         # Initialize and configure UI elements
         self.setWindowTitle("VisualDoc")
         self.setGeometry(100, 100, 800, 600)
+        self.setWindowIcon(QIcon('icon.png'))
         
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -123,10 +203,13 @@ class MainWindow(QMainWindow):
 
         self.btn_start = QPushButton("Start")
         self.btn_start.clicked.connect(self.toggle_mouse_listener)
+        self.btn_record = QPushButton("Record")
+        self.btn_record.clicked.connect(self.toggle_record_listener)
 
         bottom_widget = QWidget()
         bottom_layout = QHBoxLayout()
         bottom_layout.addWidget(self.btn_start)
+        bottom_layout.addWidget(self.btn_record)
         bottom_widget.setLayout(bottom_layout)
 
         # Add top splitter and bottom widget to main splitter
@@ -145,6 +228,8 @@ class MainWindow(QMainWindow):
         # self.installEventFilter(self)
 
         self.listener = None
+        self.loading_screen = None
+        self.audio_recorder = None
 
     def toggle_mouse_listener(self):
         """Start or stop the global mouse listener based on button state."""
@@ -162,6 +247,50 @@ class MainWindow(QMainWindow):
                 self.listener.wait()
                 self.listener = None
             self.btn_start.setText("Start")
+
+    def toggle_record_listener(self):
+        """Start or stop the global mouse listener based on button state."""
+        global MIC_USABLE
+        if self.btn_record.text() == "Record":
+            if not MIC_USABLE:
+                mic_alert = QMessageBox.information(
+                    self,
+                    "Information",
+                    "No input devices found.",
+                    QMessageBox.StandardButton.Ok,
+                    QMessageBox.StandardButton.Ok,
+                )
+                return
+            if self.selected_name == "":
+                select_shot_alert = QMessageBox.information(
+                    self,
+                    "Information",
+                    "Select screenshot.",
+                    QMessageBox.StandardButton.Ok,
+                    QMessageBox.StandardButton.Ok,
+                )
+                return
+
+            # Start the listener
+            if not self.audio_recorder:
+                self.audio_recorder = AudioRecorder()
+                self.audio_recorder.recording_done.connect(self.on_audio_recording_done)
+            self.audio_recorder.audio_name = self.selected_name
+            self.audio_recorder.start()
+            print("Audio recording started.")
+            self.btn_record.setText("Stop")
+        else:
+            # Stop the listener
+            if self.audio_recorder and self.audio_recorder.is_recording:
+                self.audio_recorder.stop()
+                self.audio_recorder.wait()
+                print("Audio recording stopped.")
+            self.btn_record.setText("Record")
+
+    def on_audio_recording_done(self, audio_path):
+        """Handle post-recording actions."""
+        print(f"Audio recording saved at: {audio_path}")
+        self.audio_recorder = None
 
     def load_images(self, folder_path):
         """Load image thumbnails into the list widget."""
@@ -205,20 +334,13 @@ class MainWindow(QMainWindow):
         item = self.image_list.itemAt(position)
         if item is not None:
             context_menu = QMenu(self)
-            open_action = QAction("Open", self)
             delete_action = QAction("Delete", self)
 
             # Connect actions
-            open_action.triggered.connect(lambda: self.open_image(item.text()))
             delete_action.triggered.connect(lambda: self.delete_image(item))
 
-            context_menu.addAction(open_action)
             context_menu.addAction(delete_action)
             context_menu.exec(self.image_list.mapToGlobal(position))
-
-    def open_image(self, filename: str):
-        """Open the selected image (placeholder for actual functionality)."""
-        print(f"Open image: {filename}")
 
     def delete_image(self, item: QListWidgetItem):
         """Delete the selected image from the list."""
@@ -231,6 +353,7 @@ class MainWindow(QMainWindow):
     def display_image(self, item: QListWidgetItem):
         """Display the selected image in the preview area."""
         filename = item.text()
+        self.selected_name = Path(filename).stem
         for file, pixmap in self.image_thumbnails:
             if file == filename:
                 self.current_image = pixmap
@@ -257,6 +380,17 @@ class MainWindow(QMainWindow):
 
     def take_screenshot(self, mouse_pos_x, mouse_pos_y):
         """Handle the screenshot logic in a separate thread."""
+        if self.isActiveWindow():
+            print("Main window is focused, ignoring the click.")
+            return
+
+        self.loading_screen = LoadingScreen()
+        self.loading_screen.show()
+
+        # element_info = get_element_under_cursor()
+        # if element_info:
+        #     print(f"Clicked Element: {element_info}")
+
         self.screenshot_worker = ScreenshotWorker(mouse_pos_x, mouse_pos_y)
         self.screenshot_worker.screenshot_done.connect(self.on_screenshot_done)
         self.screenshot_worker.start()
@@ -264,6 +398,9 @@ class MainWindow(QMainWindow):
     def on_screenshot_done(self, screenshot_path):
         """Handle post-screenshot actions."""
         print(f"Screenshot saved at: {screenshot_path}")
+        if self.loading_screen:
+            self.loading_screen.close()
+        self.load_images(SHOT_PATH)  # Reload the image list from the screenshot folder
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
